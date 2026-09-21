@@ -22,7 +22,6 @@ jobs:
 
           while IFS= read -r ZIP; do
             echo "Checking: $ZIP"
-
             if unzip -l "$ZIP" | grep -q "com/pashmak/store/v620final/MainActivity.java"; then
               FOUND="$ZIP"
               break
@@ -54,7 +53,7 @@ jobs:
         run: |
           set -e
 
-          PROJECT=$(find extracted -type f -name "settings.gradle" -o -name "settings.gradle.kts" | head -n 1 | xargs dirname)
+          PROJECT=$(find extracted -type f \( -name "settings.gradle" -o -name "settings.gradle.kts" \) | head -n 1 | xargs dirname)
 
           if [ -z "$PROJECT" ]; then
             echo "ERROR: Android project not found."
@@ -81,25 +80,20 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Setup Gradle
+      - name: Setup Gradle 8.7
         uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
 
       - name: Build APK
         working-directory: ${{ env.PROJECT }}
         run: |
-          chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon
+          gradle assembleDebug --no-daemon
 
       - name: Find APK
         run: |
           find "$PROJECT/app/build/outputs/apk" -type f -name "*.apk" -print
 
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: Pashmak-Store-v6.2.0-FINAL
-          path: ${{ env.PROJECT }}/app/build/outputs/apk/**/*.apk
-          if-no-files-found: error
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
