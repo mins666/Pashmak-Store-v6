@@ -1,4 +1,4 @@
-name: Build Pashmak Store 6.2.0 FINAL AUTO
+name: Build Pashmak Store v6.2.0 MANUAL JSON FIX
 
 on:
   workflow_dispatch:
@@ -14,89 +14,221 @@ jobs:
       - name: Find V6.2.0 project ZIP
         shell: bash
         run: |
-          set -e
-
-          echo "Searching all ZIP files..."
+          set -euo pipefail
 
           FOUND=""
 
           while IFS= read -r ZIP; do
             echo "Checking: $ZIP"
-            if unzip -l "$ZIP" | grep -q "com/pashmak/store/v620final/MainActivity.java"; then
-              FOUND="$ZIP"
-              break
+
+            if unzip -l "$ZIP" | grep -q "pashmak_final_work/settings.gradle"; then
+              if unzip -l "$ZIP" | grep -q "com/pashmak/store/v620final/MainActivity.java"; then
+                FOUND="$ZIP"
+                break
+              fi
             fi
-          done < <(find . -type f -iname "*.zip")
+          done < <(find . -type f -iname "*.zip" ! -path "./.git/*" | sort)
 
           if [ -z "$FOUND" ]; then
             echo "ERROR: V6.2.0 project ZIP was not found."
-            echo "ZIP files found:"
-            find . -type f -iname "*.zip"
+            find . -type f -iname "*.zip" -print
             exit 1
           fi
 
           echo "FOUND ZIP: $FOUND"
-          echo "ZIP=$FOUND" >> "$GITHUB_ENV"
+          echo "ZIP_FILE=$FOUND" >> "$GITHUB_ENV"
 
       - name: Verify ZIP
-        run: |
-          unzip -t "$ZIP"
+        run: unzip -t "$ZIP_FILE"
 
       - name: Extract project
+        shell: bash
         run: |
-          rm -rf extracted
-          mkdir extracted
-          unzip -q "$ZIP" -d extracted
+          set -euo pipefail
+          rm -rf project
+          mkdir project
+          unzip -q "$ZIP_FILE" -d project
 
       - name: Locate Android project
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          PROJECT=$(find extracted -type f \( -name "settings.gradle" -o -name "settings.gradle.kts" \) | head -n 1 | xargs dirname)
+          SETTINGS=$(find project -type f -name settings.gradle | sort | head -n1)
 
-          if [ -z "$PROJECT" ]; then
-            echo "ERROR: Android project not found."
-            find extracted -maxdepth 4 -type f
+          if [ -z "$SETTINGS" ]; then
+            echo "ERROR: settings.gradle not found."
+            find project -maxdepth 5 -type f | sort
             exit 1
           fi
 
-          echo "PROJECT=$PROJECT"
-          echo "PROJECT=$PROJECT" >> "$GITHUB_ENV"
+          PROJECT_DIR=$(dirname "$SETTINGS")
+          echo "PROJECT_DIR=$PROJECT_DIR"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-      - name: Verify V6.2.0
+      - name: Verify V6.2.0 and inventory fixes
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          grep -R "com.pashmak.store.v620final" "$PROJECT/app"
-          grep -R "versionCode 620" "$PROJECT/app"
-          test -f "$PROJECT/app/src/main/assets/index.html"
+          INDEX="$PROJECT_DIR/app/src/main/assets/index.html"
+          APP_GRADLE="$PROJECT_DIR/app/build.gradle"
 
-          echo "V6.2.0 project verified successfully."
+          test -f "$INDEX"
+          test -f "$APP_GRADLE"
+
+          grep -Fq "com.pashmak.store.v620final" "$APP_GRADLE"
+          grep -Fq "versionCode 620" "$APP_GRADLE"
+          grep -Fq "versionName '6.2.0-final'" "$APP_GRADLE"
+
+          grep -Fq "inventory_update" "$INDEX"
+          grep -Fq "parseInventoryJSON" "$INDEX"
+          grep -Fq "parseInventoryText" "$INDEX"
+          grep -Fq "initialBaseLayer" "$INDEX"
+          grep -Fq "for=\"initialInventoryJson\"" "$INDEX"
+          grep -Fq "for=\"import\"" "$INDEX"
+
+          echo "V6.2.0 + manual/JSON inventory verification OK."
+
+      - name: Check JavaScript syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          node - "$PROJECT_DIR/app/src/main/assets/index.html" <<'NODE'
+          const fs = require('fs');
+          const vm = require('vm');
+
+          const html = fs.readFileSync(process.argv[2], 'utf8');
+          const blocks = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)];
+
+          if (!blocks.length) {
+            throw new Error('No JavaScript blocks found');
+          }
+
+          blocks.forEach((m, i) => {
+            new vm.Script(m[1], {
+              filename: `index-script-${i}.js`
+            });
+          });
+
+          console.log(
+            `JavaScript syntax OK: ${blocks.length} script blocks checked.`
+          );
+          NODE
 
       - name: Setup Java 17
         uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: '17'
 
       - name: Setup Gradle 8.7
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: "8.7"
+          gradle-version: '8.7'
 
-      - name: Build APK
-        working-directory: ${{ env.PROJECT }}
+      - name: Prepare Android SDK 35
+        shell: bash
         run: |
-          gradle assembleDebug --no-daemon
+          set -euo pipefail
 
-      - name: Find APK
+          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" \
+            -type f \
+            -name sdkmanager \
+            | sort \
+            | head -n1 || true)"
+
+          if [ -z "$SDKMANAGER" ]; then
+            SDKMANAGER="$(command -v sdkmanager || true)"
+          fi
+
+          test -n "$SDKMANAGER"
+
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+
+          "$SDKMANAGER" \
+            'platform-tools' \
+            'platforms;android-35' \
+            'build-tools;35.0.0'
+
+          test -x "$ANDROID_HOME/build-tools/35.0.0/zipalign"
+          test -x "$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          test -x "$ANDROID_HOME/build-tools/35.0.0/aapt"
+
+      - name: Build debug APK
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          find "$PROJECT/app/build/outputs/apk" -type f -name "*.apk" -print
+          gradle clean assembleDebug --no-daemon --stacktrace
 
-      - name: Upload APK
+      - name: Prepare signed APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK=$(find "$PROJECT_DIR/app/build/outputs/apk/debug" \
+            -type f \
+            -name '*.apk' \
+            | sort \
+            | head -n1)
+
+          test -n "$APK"
+
+          cp "$APK" Pashmak-Store-v6.2.0-unsigned.apk
+
+          keytool -genkeypair -v \
+            -keystore "$RUNNER_TEMP/pashmak-v6.2.0.keystore" \
+            -alias pashmakv620 \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -storepass pashmak123 \
+            -keypass pashmak123 \
+            -dname 'CN=Pashmak Store, OU=Pashmak, O=Pashmak, L=Tehran, ST=Tehran, C=IR'
+
+          "$ANDROID_HOME/build-tools/35.0.0/zipalign" \
+            -f 4 \
+            Pashmak-Store-v6.2.0-unsigned.apk \
+            Pashmak-Store-v6.2.0-aligned.apk
+
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign \
+            --ks "$RUNNER_TEMP/pashmak-v6.2.0.keystore" \
+            --ks-key-alias pashmakv620 \
+            --ks-pass pass:pashmak123 \
+            --key-pass pass:pashmak123 \
+            --out Pashmak-Store-v6.2.0.apk \
+            Pashmak-Store-v6.2.0-aligned.apk
+
+      - name: Verify final APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" \
+            verify \
+            --verbose \
+            Pashmak-Store-v6.2.0.apk
+
+          BADGING=$(
+            "$ANDROID_HOME/build-tools/35.0.0/aapt" \
+            dump badging \
+            Pashmak-Store-v6.2.0.apk
+          )
+
+          echo "$BADGING"
+
+          echo "$BADGING" | grep -Fq \
+            "package: name='com.pashmak.store.v620final'"
+
+          echo "$BADGING" | grep -Fq \
+            "versionCode='620'"
+
+          echo "$BADGING" | grep -Fq \
+            "versionName='6.2.0-final'"
+
+      - name: Upload final APK
         uses: actions/upload-artifact@v4
         with:
-          name: Pashmak-Store-v6.2.0-FINAL
-          path: ${{ env.PROJECT }}/app/build/outputs/apk/**/*.apk
+          name: Pashmak-Store-v6.2.0-MANUAL-JSON-FIX
+          path: Pashmak-Store-v6.2.0.apk
           if-no-files-found: error
